@@ -1,3 +1,8 @@
+<<<<<<< HEAD
+=======
+# Datatalk
+Preguntale a los datos
+>>>>>>> 165bf8fc9a9943323c100eae45bd0c2280d62178
 # ExcelGPT - Consulta Inteligente de Datos
 
 Aplicación web para análisis inteligente de datos Excel usando procesamiento de lenguaje natural.
@@ -67,4 +72,8 @@ streamlit run app.py
 
 - "¿Cuántos registros hay por NIVEL en la FACULTAD de MEDICINA?"
 - "¿Cuál es el promedio de edad en la FACULTAD de INGENIERÍA?"
+<<<<<<< HEAD
 - "En la FACULTAD de MEDICINA, para el NIVEL de PREGRADO ¿Cuántos registros hay por PROGRAMA?" 
+=======
+- "En la FACULTAD de MEDICINA, para el NIVEL de PREGRADO ¿Cuántos registros hay por PROGRAMA?"
+>>>>>>> 165bf8fc9a9943323c100eae45bd0c2280d62178

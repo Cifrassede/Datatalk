@@ -43,4 +43,8 @@ Thumbs.db
 
 # Excel temp files
 ~$*.xlsx
+<<<<<<< HEAD
 ~$*.xls 
+=======
+~$*.xls 
+>>>>>>> 165bf8fc9a9943323c100eae45bd0c2280d62178
