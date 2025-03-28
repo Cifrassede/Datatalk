@@ -9,3 +9,5 @@ xlrd>=2.0.1
 numpy>=1.24.0
 plotly>=5.18.0
 gunicorn>=20.1.0
+gspread==5.10.0
+google-auth
