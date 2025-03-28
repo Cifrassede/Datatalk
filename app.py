@@ -9,6 +9,11 @@ import numpy as np
 import re
 import plotly.express as px
 import plotly.graph_objects as go
+import requests
+import json
+import gspread
+from google.oauth2 import service_account
+from urllib.parse import urlparse, parse_qs
 
 # Cargar variables de entorno
 load_dotenv()
@@ -33,6 +38,225 @@ def read_excel_file(file):
         if "xlrd" in str(e):
             raise Exception("Error con el formato .xls - Por favor, guarda tu archivo en formato .xlsx y vuelve a intentarlo")
         raise Exception(f"Error al leer el archivo: {str(e)}")
+
+def read_from_api(url, pagination_type="none", total_records=None, page_size=1000):
+    """
+    Lee datos desde una API JSON con soporte para paginación
+    Args:
+        url: URL base de la API
+        pagination_type: Tipo de paginación ('page', 'offset', 'none')
+        total_records: Número total de registros a extraer (None para todos)
+        page_size: Tamaño de cada página
+    """
+    try:
+        all_data = []
+        current_page = 1
+        offset = 0
+        
+        while True:
+            # Construir URL con parámetros de paginación
+            if pagination_type == "page":
+                paginated_url = f"{url}{'&' if '?' in url else '?'}page={current_page}&limit={page_size}"
+            elif pagination_type == "offset":
+                paginated_url = f"{url}{'&' if '?' in url else '?'}offset={offset}&limit={page_size}"
+            else:
+                paginated_url = url
+            
+            # Realizar la petición
+            response = requests.get(paginated_url)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Extraer datos según la estructura
+            if isinstance(data, list):
+                page_data = data
+            elif isinstance(data, dict):
+                # Buscar la lista de datos en el diccionario
+                for key, value in data.items():
+                    if isinstance(value, list):
+                        page_data = value
+                        break
+                else:
+                    page_data = []
+            else:
+                raise Exception("Formato JSON no soportado")
+            
+            # Si no hay más datos, terminar
+            if not page_data:
+                break
+                
+            all_data.extend(page_data)
+            
+            # Verificar si hemos alcanzado el total de registros deseado
+            if total_records and len(all_data) >= total_records:
+                all_data = all_data[:total_records]
+                break
+                
+            # Preparar siguiente página
+            if pagination_type == "page":
+                current_page += 1
+            elif pagination_type == "offset":
+                offset += len(page_data)
+            else:
+                break  # Si no hay paginación, solo hacer una petición
+            
+            # Mostrar progreso
+            st.write(f"Registros obtenidos: {len(all_data)}")
+            
+        # Convertir a DataFrame
+        df = pd.DataFrame(all_data)
+        st.write(f"Total de registros obtenidos: {len(df)}")
+        return df
+        
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Error al obtener datos de la API: {str(e)}")
+    except json.JSONDecodeError as e:
+        raise Exception(f"Error al decodificar JSON: {str(e)}")
+    except Exception as e:
+        raise Exception(f"Error al procesar datos de la API: {str(e)}")
+
+def read_google_sheet(url):
+    """
+    Lee datos desde una hoja de cálculo de Google Sheets
+    Args:
+        url: URL de la hoja de cálculo de Google Sheets
+    Returns:
+        DataFrame de pandas con los datos
+    """
+    try:
+        # Extraer el ID de la hoja de cálculo de la URL
+        parsed_url = urlparse(url)
+        
+        # Diferentes patrones de URL de Google Sheets
+        if 'spreadsheets/d/' in url:
+            # Formato: https://docs.google.com/spreadsheets/d/[ID]/edit#gid=[GID]
+            path_parts = parsed_url.path.split('/')
+            try:
+                sheet_id = path_parts[path_parts.index('d') + 1]
+            except ValueError:
+                # Intentar encontrar el ID después de "/spreadsheets/d/"
+                for part in path_parts:
+                    if len(part) > 20:  # Los IDs de Google Sheets suelen ser largos
+                        sheet_id = part
+                        break
+                else:
+                    raise Exception("No se pudo extraer el ID de la hoja de cálculo de la URL")
+        elif 'docs.google.com/spreadsheets' in url and 'key=' in url:
+            # Formato antiguo: https://docs.google.com/spreadsheets/ccc?key=[ID]
+            sheet_id = parse_qs(parsed_url.query).get('key', [''])[0]
+        else:
+            # Si es solo el ID
+            sheet_id = url.strip()
+        
+        # Extraer el gid (ID de la pestaña) si está presente
+        gid = None
+        if 'gid=' in url:
+            query_params = parse_qs(parsed_url.fragment if parsed_url.fragment else parsed_url.query)
+            gid = query_params.get('gid', ['0'])[0]
+        
+        st.write(f"Intentando acceder a la hoja de cálculo con ID: {sheet_id}")
+        if gid:
+            st.write(f"Pestaña (gid): {gid}")
+        
+        # Verificar si existe un archivo de credenciales
+        creds_file = os.path.join(os.getcwd(), 'credentials.json')
+        
+        if os.path.exists(creds_file):
+            # Usar credenciales de servicio si existen
+            credentials = service_account.Credentials.from_service_account_file(
+                creds_file, 
+                scopes=['https://www.googleapis.com/auth/spreadsheets']
+            )
+            gc = gspread.authorize(credentials)
+            
+            # Abrir la hoja de cálculo con credenciales
+            try:
+                spreadsheet = gc.open_by_key(sheet_id)
+            except gspread.exceptions.APIError as e:
+                if "The caller does not have permission" in str(e):
+                    raise Exception("No tienes permisos para acceder a esta hoja de cálculo. Asegúrate de que sea pública o que tengas acceso.")
+                else:
+                    raise e
+            
+            # Seleccionar la pestaña correcta
+            if gid:
+                worksheet = None
+                for sheet in spreadsheet.worksheets():
+                    if sheet.id == int(gid):
+                        worksheet = sheet
+                        break
+                if worksheet is None:
+                    worksheet = spreadsheet.sheet1  # Default to first sheet if gid not found
+            else:
+                worksheet = spreadsheet.sheet1  # Default to first sheet if no gid specified
+            
+            # Obtener todos los valores como lista de listas
+            data = worksheet.get_all_values()
+            
+            if not data:
+                raise Exception("La hoja de cálculo está vacía")
+            
+            # Convertir a DataFrame
+            headers = data[0]
+            if len(data) > 1:
+                df = pd.DataFrame(data[1:], columns=headers)
+                
+                # Intentar convertir columnas numéricas
+                for col in df.columns:
+                    try:
+                        df[col] = pd.to_numeric(df[col])
+                    except:
+                        pass  # Si no se puede convertir, dejar como string
+                
+                return df
+            else:
+                return pd.DataFrame(columns=headers)
+        else:
+            # Si no hay credenciales, intentar acceder directamente sin mostrar advertencia
+            try:
+                # Usar requests para obtener los datos directamente con encoding UTF-8
+                response = requests.get(f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid or 0}")
+                response.raise_for_status()
+                
+                # Asegurar que el contenido se decodifique correctamente con UTF-8
+                response.encoding = 'utf-8'
+                
+                # Convertir CSV a DataFrame con encoding UTF-8
+                df = pd.read_csv(
+                    pd.io.common.StringIO(response.text),
+                    encoding='utf-8',
+                    encoding_errors='replace'  # Reemplazar caracteres que no se puedan decodificar
+                )
+                
+                # Intentar convertir columnas numéricas
+                for col in df.columns:
+                    try:
+                        df[col] = pd.to_numeric(df[col])
+                    except:
+                        pass  # Si no se puede convertir, dejar como string
+                
+                return df
+            except requests.exceptions.RequestException as e:
+                # Solo mostrar advertencia si hay un error al acceder
+                st.warning("""
+                No se encontró un archivo de credenciales. Para acceder a hojas de cálculo privadas, necesitas:
+                1. Crear un proyecto en Google Cloud Console
+                2. Habilitar la API de Google Sheets
+                3. Crear credenciales de servicio
+                4. Descargar el archivo JSON y guardarlo como 'credentials.json' en la carpeta del proyecto
+                
+                Por ahora, solo se puede acceder a hojas de cálculo públicas.
+                """)
+                
+                if "404" in str(e):
+                    raise Exception("Hoja de cálculo no encontrada o no es accesible públicamente.")
+                else:
+                    raise Exception(f"Error al acceder a la hoja de cálculo: {str(e)}")
+            
+    except gspread.exceptions.SpreadsheetNotFound:
+        raise Exception("Hoja de cálculo no encontrada. Verifica la URL.")
+    except Exception as e:
+        raise Exception(f"Error al leer la hoja de cálculo: {str(e)}")
 
 def extract_filters_from_question(question, df):
     """
@@ -148,18 +372,61 @@ def process_question_free(df, question):
                     for val in sorted(unique_values):
                         response += f"- {val}\n"
                     return response, None
-
-        # Análisis básico según el tipo de pregunta
-        if "cuántos" in question_lower or "cuantos" in question_lower or "total" in question_lower:
-            # Si la pregunta menciona "por" seguido de una columna
+        
+        # Verificar si la pregunta solicita operaciones específicas
+        if "promedio" in question_lower or "media" in question_lower:
+            # Buscar promedios de columnas numéricas
+            numeric_cols = df.select_dtypes(include=[np.number]).columns
+            response = "Promedios encontrados:\n"
+            for col in numeric_cols:
+                response += f"- Promedio de {col}: {df[col].mean():.2f}\n"
+            
+            return response, None
+        
+        elif "máximo" in question_lower or "maximo" in question_lower:
+            # Buscar valores máximos
+            numeric_cols = df.select_dtypes(include=[np.number]).columns
+            response = "Valores máximos encontrados:\n"
+            for col in numeric_cols:
+                response += f"- Máximo de {col}: {df[col].max()}\n"
+            
+            return response, None
+        
+        elif "mínimo" in question_lower or "minimo" in question_lower:
+            # Buscar valores mínimos
+            numeric_cols = df.select_dtypes(include=[np.number]).columns
+            response = "Valores mínimos encontrados:\n"
+            for col in numeric_cols:
+                response += f"- Mínimo de {col}: {df[col].min()}\n"
+            
+            return response, None
+        
+        elif "resumen" in question_lower or "información general" in question_lower or "estadísticas" in question_lower:
+            # Información general
+            response = "Información general del dataset:\n"
+            response += f"- Total de registros: {len(df)}\n"
+            response += f"- Columnas disponibles: {', '.join(df.columns)}\n"
+            response += "\nEstadísticas básicas:\n"
+            for col in df.select_dtypes(include=[np.number]).columns:
+                response += f"\n{col}:\n"
+                response += f"- Promedio: {df[col].mean():.2f}\n"
+                response += f"- Máximo: {df[col].max()}\n"
+                response += f"- Mínimo: {df[col].min():.2f}\n"
+                response += f"- Conteo: {df[col].count()}\n"
+            
+            return response, None
+        
+        # Por defecto, asumir que se pregunta por la cantidad de registros
+        else:
+            # Contar registros totales después de aplicar filtros
+            total_registros = len(df)
+            response = f"Total de registros: {total_registros}\n\n"
+            
+            # Verificar si la pregunta menciona "por" seguido de una columna
             if "por" in question_lower:
                 # Buscar la columna mencionada después de "por"
                 for col in df.columns:
                     if col.lower() in question_lower.split("por")[-1]:
-                        # Contar registros totales después de aplicar filtros
-                        total_registros = len(df)
-                        response = f"Total de registros: {total_registros}\n\n"
-                        
                         # Mostrar distribución por la columna especificada
                         value_counts = df[col].value_counts().sort_index()
                         response += f"Distribución por {col}:\n"
@@ -178,56 +445,64 @@ def process_question_free(df, question):
                             plot_data['values'].append(count)
                         
                         return response, plot_data
-                        break
-            # Si la pregunta menciona directamente una columna
+            
+            # Si no se especifica "por", pero se menciona una columna, mostrar distribución para esa columna
             elif any(col.lower() in question_lower for col in df.columns):
-                # Contar registros totales
-                response = f"Total de registros: {len(df)}\n"
-                # Mostrar conteos para la columna mencionada
                 for col in df.columns:
                     if col.lower() in question_lower:
-                        value_counts = df[col].value_counts()
-                        response += f"\nDistribución de {col}:\n"
+                        # Mostrar distribución por la columna mencionada
+                        value_counts = df[col].value_counts().sort_index()
+                        response += f"Distribución por {col}:\n"
+                        
+                        # Crear un diccionario ordenado para almacenar los datos
+                        plot_data = {
+                            'col': col,
+                            'labels': [],
+                            'values': []
+                        }
+                        
+                        # Generar tanto la respuesta como los datos del gráfico
                         for val, count in value_counts.items():
                             response += f"- {val}: {count} registros\n"
+                            plot_data['labels'].append(str(val))
+                            plot_data['values'].append(count)
+                        
+                        return response, plot_data
+            
+            # Si no se menciona ninguna columna específica, mostrar distribución para una columna relevante
             else:
-                # Contar registros totales
-                response = f"Total de registros: {len(df)}\n"
-        
-        elif "promedio" in question_lower or "media" in question_lower:
-            # Buscar promedios de columnas numéricas
-            numeric_cols = df.select_dtypes(include=[np.number]).columns
-            response = "Promedios encontrados:\n"
-            for col in numeric_cols:
-                response += f"- Promedio de {col}: {df[col].mean():.2f}\n"
-        
-        elif "máximo" in question_lower or "maximo" in question_lower:
-            # Buscar valores máximos
-            numeric_cols = df.select_dtypes(include=[np.number]).columns
-            response = "Valores máximos encontrados:\n"
-            for col in numeric_cols:
-                response += f"- Máximo de {col}: {df[col].max()}\n"
-        
-        elif "mínimo" in question_lower or "minimo" in question_lower:
-            # Buscar valores mínimos
-            numeric_cols = df.select_dtypes(include=[np.number]).columns
-            response = "Valores mínimos encontrados:\n"
-            for col in numeric_cols:
-                response += f"- Mínimo de {col}: {df[col].min()}\n"
-        
-        else:
-            # Información general
-            response = "Información general del dataset:\n"
-            response += f"- Total de registros: {len(df)}\n"
-            response += f"- Columnas disponibles: {', '.join(df.columns)}\n"
-            response += "\nEstadísticas básicas:\n"
-            for col in df.select_dtypes(include=[np.number]).columns:
-                response += f"\n{col}:\n"
-                response += f"- Promedio: {df[col].mean():.2f}\n"
-                response += f"- Máximo: {df[col].max()}\n"
-                response += f"- Mínimo: {df[col].min():.2f}\n"
-
-        return response, None
+                # Intentar encontrar una columna categórica con pocos valores únicos (ideal para visualización)
+                categorical_cols = []
+                for col in df.columns:
+                    if df[col].nunique() < 20 and df[col].nunique() > 1:  # Columnas con entre 2 y 20 valores únicos
+                        categorical_cols.append((col, df[col].nunique()))
+                
+                if categorical_cols:
+                    # Ordenar por número de valores únicos (ascendente)
+                    categorical_cols.sort(key=lambda x: x[1])
+                    best_col = categorical_cols[0][0]
+                    
+                    # Mostrar distribución por la columna seleccionada
+                    value_counts = df[best_col].value_counts().sort_index()
+                    response += f"Distribución por {best_col}:\n"
+                    
+                    # Crear un diccionario ordenado para almacenar los datos
+                    plot_data = {
+                        'col': best_col,
+                        'labels': [],
+                        'values': []
+                    }
+                    
+                    # Generar tanto la respuesta como los datos del gráfico
+                    for val, count in value_counts.items():
+                        response += f"- {val}: {count} registros\n"
+                        plot_data['labels'].append(str(val))
+                        plot_data['values'].append(count)
+                    
+                    return response, plot_data
+            
+            # Si no hay columnas categóricas adecuadas, solo devolver el total
+            return response, None
 
     except Exception as e:
         raise Exception(f"Error al procesar la pregunta: {str(e)}")
@@ -279,7 +554,7 @@ def main():
     )
 
     st.title("📊 ExcelGPT - Consulta Inteligente de Datos")
-    st.write("Carga tu archivo Excel y haz preguntas sobre tus datos")
+    st.write("Carga tu archivo Excel o ingresa una URL de API JSON y haz preguntas sobre tus datos")
     st.write("💡 Recomendación: Para mejor compatibilidad, usa archivos en formato .xlsx")
 
     # Selección del modelo
@@ -288,14 +563,73 @@ def main():
         ["Análisis Básico (Sin API)", "OpenAI (requiere API key)"]
     )
 
-    # Subida de archivo
-    uploaded_file = st.file_uploader("Elige un archivo Excel", type=['xlsx', 'xls'])
+    # Selección de fuente de datos
+    data_source = st.radio(
+        "Selecciona la fuente de datos:",
+        ["Archivo Excel", "Google Sheets", "API JSON"]
+    )
 
-    if uploaded_file is not None:
+    df = None
+    if data_source == "Archivo Excel":
+        # Subida de archivo
+        uploaded_file = st.file_uploader("Elige un archivo Excel", type=['xlsx', 'xls'])
+        if uploaded_file is not None:
+            try:
+                df = read_excel_file(uploaded_file)
+            except Exception as e:
+                st.error(f"Error al procesar el archivo: {str(e)}")
+    elif data_source == "Google Sheets":
+        # Entrada para la URL de Google Sheets
+        sheets_url = st.text_input(
+            "Ingresa la URL de la hoja de cálculo de Google Sheets:",
+            placeholder="https://docs.google.com/spreadsheets/d/..."
+        )
+        
+        if sheets_url:
+            try:
+                with st.spinner("Obteniendo datos de Google Sheets..."):
+                    df = read_google_sheet(sheets_url)
+            except Exception as e:
+                st.error(f"Error al obtener datos de Google Sheets: {str(e)}")
+    else:
+        # Configuración de la API
+        api_url = st.text_input("Ingresa la URL de la API JSON:")
+        
+        # Opciones de paginación
+        pagination_type = st.selectbox(
+            "Tipo de paginación",
+            ["none", "page", "offset"],
+            help="Selecciona el tipo de paginación que usa la API"
+        )
+        
+        total_records = st.number_input(
+            "Número total de registros a extraer (0 para todos)",
+            min_value=0,
+            value=1000,
+            help="Ingresa el número total de registros que deseas extraer"
+        )
+        
+        page_size = st.number_input(
+            "Registros por página",
+            min_value=1,
+            value=1000,
+            help="Número de registros a obtener en cada petición"
+        )
+        
+        if api_url:
+            try:
+                with st.spinner("Obteniendo datos de la API..."):
+                    df = read_from_api(
+                        api_url,
+                        pagination_type=pagination_type,
+                        total_records=total_records if total_records > 0 else None,
+                        page_size=page_size
+                    )
+            except Exception as e:
+                st.error(f"Error al obtener datos de la API: {str(e)}")
+
+    if df is not None:
         try:
-            # Leer el archivo Excel
-            df = read_excel_file(uploaded_file)
-            
             # Mostrar información básica
             st.write("### Vista previa de los datos")
             st.dataframe(df.head())
@@ -325,13 +659,18 @@ def main():
                             # Mostrar el gráfico solo si hay datos para visualizar
                             if plot_data is not None:
                                 st.write("\n### Visualización de la distribución")
+                                
+                                # Invertir el orden de las etiquetas y valores para mostrar la gráfica en orden inverso
+                                plot_data['labels'] = plot_data['labels'][::-1]
+                                plot_data['values'] = plot_data['values'][::-1]
+                                
                                 fig = go.Figure(data=[
                                     go.Bar(
                                         x=plot_data['values'],
                                         y=plot_data['labels'],
                                         text=plot_data['values'],
                                         textposition='auto',
-                                        orientation='h'  # Hacer el gráfico horizontal
+                                        orientation='h'
                                     )
                                 ])
                                 fig.update_layout(
@@ -339,9 +678,9 @@ def main():
                                     xaxis_title='Cantidad de registros',
                                     yaxis_title=plot_data["col"],
                                     showlegend=False,
-                                    height=max(500, len(plot_data['labels']) * 30),  # Ajustar altura según número de categorías
-                                    yaxis={'type': 'category'},  # Mantener el orden exacto de las categorías
-                                    margin=dict(l=200)  # Dar más espacio para etiquetas largas
+                                    height=max(500, len(plot_data['labels']) * 30),
+                                    yaxis={'type': 'category'},
+                                    margin=dict(l=200)
                                 )
                                 st.plotly_chart(fig, use_container_width=True)
                         else:
@@ -354,11 +693,11 @@ def main():
                             st.warning("Para usar OpenAI, necesitas configurar tu API key en el archivo .env")
                 
         except Exception as e:
-            st.error(f"Error al procesar el archivo: {str(e)}")
+            st.error(f"Error al procesar los datos: {str(e)}")
             st.write("Sugerencias:")
-            st.write("1. Guarda tu archivo en formato .xlsx y vuelve a intentarlo")
-            st.write("2. Asegúrate de que el archivo no esté dañado o protegido")
-            st.write("3. Verifica que puedas abrir el archivo en Excel normalmente")
+            st.write("1. Verifica que los datos tengan el formato correcto")
+            st.write("2. Asegúrate de que las columnas mencionadas en las preguntas existan")
+            st.write("3. Revisa que los valores en los datos sean consistentes")
 
 if __name__ == "__main__":
     main()
