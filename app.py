@@ -566,7 +566,7 @@ def main():
     # Selección de fuente de datos
     data_source = st.radio(
         "Selecciona la fuente de datos:",
-        ["Archivo Excel", "Google Sheets", "API JSON"]
+        ["Google Sheets", "API JSON", "Archivo Excel"]
     )
 
     df = None
@@ -579,9 +579,10 @@ def main():
             except Exception as e:
                 st.error(f"Error al procesar el archivo: {str(e)}")
     elif data_source == "Google Sheets":
-        # Entrada para la URL de Google Sheets
+        # Entrada para la URL de Google Sheets con valor predeterminado
         sheets_url = st.text_input(
             "Ingresa la URL de la hoja de cálculo de Google Sheets:",
+            value="https://docs.google.com/spreadsheets/d/1lOsVZOuIg8Bx4ocEpOr6gOankLZMZagG/edit?gid=2078880090#gid=2078880090",
             placeholder="https://docs.google.com/spreadsheets/d/..."
         )
         
@@ -592,8 +593,13 @@ def main():
             except Exception as e:
                 st.error(f"Error al obtener datos de Google Sheets: {str(e)}")
     else:
-        # Configuración de la API
-        api_url = st.text_input("Ingresa la URL de la API JSON:")
+        # Configuración de la API con valor predeterminado
+        st.info("Los datos de ejemplo provienen de la API Socrata: https://dev.socrata.com/foundry/www.datos.gov.co/5pqr-ifsd")
+        
+        api_url = st.text_input(
+            "Ingresa la URL de la API JSON:",
+            value="https://www.datos.gov.co/resource/5pqr-ifsd.json?year=2023&sede_nombre_mat=Bogotá&facultad=Artes&sexo=Mujeres"
+        )
         
         # Opciones de paginación
         pagination_type = st.selectbox(
